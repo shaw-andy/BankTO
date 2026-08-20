@@ -291,7 +291,7 @@ public final class LedgerMonolithController {
      * Reject a request identity already seen in this process or the ledger.
      */
     private void rejectIfDuplicateRequest(String requestUuid) {
-        if (requestUuid.isEmpty()) {
+        if (requestUuid == null || requestUuid.isEmpty()) {
             return;
         }
         if (this.ledgerWriterCache.asMap().containsKey(requestUuid)
@@ -310,7 +310,7 @@ public final class LedgerMonolithController {
             transactionRepository.save(transaction);
         } catch (DataIntegrityViolationException e) {
             String requestUuid = transaction.getRequestUuid();
-            if (!requestUuid.isEmpty()
+            if (requestUuid != null && !requestUuid.isEmpty()
                     && transactionRepository.existsByRequestUuid(requestUuid)) {
                 throw new IllegalStateException(
                         EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
@@ -324,7 +324,7 @@ public final class LedgerMonolithController {
      */
     private void rememberRequest(Transaction transaction) {
         String requestUuid = transaction.getRequestUuid();
-        if (!requestUuid.isEmpty()) {
+        if (requestUuid != null && !requestUuid.isEmpty()) {
             this.ledgerWriterCache.put(requestUuid,
                     transaction.getTransactionId());
         }
