@@ -18,12 +18,15 @@ package anthos.samples.bankofanthos.ledgerwriter;
 
 import static anthos.samples.bankofanthos.ledgerwriter.ExceptionMessages.EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION;
 import static anthos.samples.bankofanthos.ledgerwriter.ExceptionMessages.EXCEPTION_MESSAGE_INSUFFICIENT_BALANCE;
+import static anthos.samples.bankofanthos.ledgerwriter.ExceptionMessages.EXCEPTION_MESSAGE_MANUAL_REVIEW_REQUIRED;
 import static anthos.samples.bankofanthos.ledgerwriter.ExceptionMessages.EXCEPTION_MESSAGE_WHEN_AUTHORIZATION_HEADER_NULL;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.MockitoAnnotations.initMocks;
 
@@ -76,27 +79,19 @@ class LedgerWriterControllerTest {
     private static final int SENDER_BALANCE = 40;
     private static final int LARGER_THAN_SENDER_BALANCE = 1000;
     private static final int SMALLER_THAN_SENDER_BALANCE = 10;
+    private static final String TO_ACCOUNT_NUM = "5678901234";
+    private static final String TO_ROUTING_NUM = "567891234";
+    private static final int BELOW_HIGH_VALUE_AMOUNT = 999_999;
+    private static final int HIGH_VALUE_THRESHOLD_CENTS = 1_000_000;
+    private static final int ABOVE_HIGH_VALUE_AMOUNT = 1_000_001;
+    private static final int HIGH_VALUE_SENDER_BALANCE = 2_000_000;
+
+    private StackdriverMeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
         initMocks(this);
-        StackdriverMeterRegistry meterRegistry = new StackdriverMeterRegistry(new StackdriverConfig() {
-              @Override
-              public boolean enabled() {
-                return false;
-              }
-
-              @Override
-              public String projectId() {
-                return "test";
-              }
-
-              @Override
-              @Nullable
-              public String get(String key) {
-                return null;
-              }
-          }, clock);
+        meterRegistry = newMeterRegistry();
 
         ledgerWriterController = new LedgerWriterController(verifier,
                 meterRegistry,
@@ -402,5 +397,120 @@ class LedgerWriterControllerTest {
                 EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION,
                 duplicateResult.getBody());
         assertEquals(HttpStatus.BAD_REQUEST, duplicateResult.getStatusCode());
+    }
+
+    @Test
+    @DisplayName("Given outbound amount is one cent below CAD $10,000, "
+            + "transaction is persisted")
+    void addTransactionSuccessWhenOutboundAmountBelowHighValue(
+            TestInfo testInfo) {
+        LedgerWriterController spyController =
+                spy(controllerWithRealValidator());
+        stubValidOutboundTransaction(BELOW_HIGH_VALUE_AMOUNT, testInfo);
+        doReturn(HIGH_VALUE_SENDER_BALANCE).when(spyController)
+                .getAvailableBalance(TOKEN, AUTHED_ACCOUNT_NUM);
+
+        final ResponseEntity actualResult =
+                spyController.addTransaction(BEARER_TOKEN, transaction);
+
+        assertNotNull(actualResult);
+        assertEquals(ledgerWriterController.READINESS_CODE,
+                actualResult.getBody());
+        assertEquals(HttpStatus.CREATED, actualResult.getStatusCode());
+        verify(transactionRepository).save(transaction);
+    }
+
+    @Test
+    @DisplayName("Given outbound amount is exactly CAD $10,000, "
+            + "return MANUAL_REVIEW_REQUIRED and do not persist")
+    void addTransactionFailWhenOutboundAmountEqualsHighValue(
+            TestInfo testInfo) {
+        assertHighValueOutboundNotPersisted(
+                HIGH_VALUE_THRESHOLD_CENTS, testInfo);
+    }
+
+    @Test
+    @DisplayName("Given outbound amount is above CAD $10,000, "
+            + "return MANUAL_REVIEW_REQUIRED and do not persist")
+    void addTransactionFailWhenOutboundAmountAboveHighValue(
+            TestInfo testInfo) {
+        assertHighValueOutboundNotPersisted(
+                ABOVE_HIGH_VALUE_AMOUNT, testInfo);
+    }
+
+    @Test
+    @DisplayName("Given inbound deposit amount is CAD $10,000, "
+            + "transaction is persisted")
+    void addTransactionSuccessWhenInboundAmountEqualsHighValue(
+            TestInfo testInfo) {
+        LedgerWriterController controller = controllerWithRealValidator();
+        when(claim.asString()).thenReturn(AUTHED_ACCOUNT_NUM);
+        when(transaction.getFromAccountNum()).thenReturn("0987654321");
+        when(transaction.getFromRoutingNum()).thenReturn(NON_LOCAL_ROUTING_NUM);
+        when(transaction.getToAccountNum()).thenReturn(AUTHED_ACCOUNT_NUM);
+        when(transaction.getToRoutingNum()).thenReturn(LOCAL_ROUTING_NUM);
+        when(transaction.getAmount()).thenReturn(HIGH_VALUE_THRESHOLD_CENTS);
+        when(transaction.getRequestUuid()).thenReturn(testInfo.getDisplayName());
+
+        final ResponseEntity actualResult =
+                controller.addTransaction(BEARER_TOKEN, transaction);
+
+        assertNotNull(actualResult);
+        assertEquals(ledgerWriterController.READINESS_CODE,
+                actualResult.getBody());
+        assertEquals(HttpStatus.CREATED, actualResult.getStatusCode());
+        verify(transactionRepository).save(transaction);
+    }
+
+    private LedgerWriterController controllerWithRealValidator() {
+        return new LedgerWriterController(verifier,
+                newMeterRegistry(),
+                transactionRepository, new TransactionValidator(),
+                LOCAL_ROUTING_NUM, BALANCES_API_ADDR, VERSION);
+    }
+
+    private StackdriverMeterRegistry newMeterRegistry() {
+        return new StackdriverMeterRegistry(new StackdriverConfig() {
+              @Override
+              public boolean enabled() {
+                return false;
+              }
+
+              @Override
+              public String projectId() {
+                return "test";
+              }
+
+              @Override
+              @Nullable
+              public String get(String key) {
+                return null;
+              }
+          }, clock);
+    }
+
+    private void stubValidOutboundTransaction(int amount, TestInfo testInfo) {
+        when(claim.asString()).thenReturn(AUTHED_ACCOUNT_NUM);
+        when(transaction.getFromAccountNum()).thenReturn(AUTHED_ACCOUNT_NUM);
+        when(transaction.getFromRoutingNum()).thenReturn(LOCAL_ROUTING_NUM);
+        when(transaction.getToAccountNum()).thenReturn(TO_ACCOUNT_NUM);
+        when(transaction.getToRoutingNum()).thenReturn(TO_ROUTING_NUM);
+        when(transaction.getAmount()).thenReturn(amount);
+        when(transaction.getRequestUuid()).thenReturn(testInfo.getDisplayName());
+    }
+
+    private void assertHighValueOutboundNotPersisted(
+            int amount, TestInfo testInfo) {
+        LedgerWriterController controller = controllerWithRealValidator();
+        stubValidOutboundTransaction(amount, testInfo);
+
+        final ResponseEntity actualResult =
+                controller.addTransaction(BEARER_TOKEN, transaction);
+
+        assertNotNull(actualResult);
+        assertEquals(EXCEPTION_MESSAGE_MANUAL_REVIEW_REQUIRED,
+                actualResult.getBody());
+        assertEquals(HttpStatus.BAD_REQUEST, actualResult.getStatusCode());
+        verify(transactionRepository, never()).save(transaction);
     }
 }
