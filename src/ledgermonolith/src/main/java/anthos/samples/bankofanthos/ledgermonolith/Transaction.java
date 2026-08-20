@@ -23,8 +23,8 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
-import jakarta.persistence.Transient;
 
 import org.hibernate.annotations.CreationTimestamp;
 
@@ -61,9 +61,9 @@ public final class Transaction {
     @CreationTimestamp
     @JsonProperty("timestamp")
     private Date timestamp;
-    // UUID is used for preventing duplicate requests from client
-    // Do not persist to database
-    @Transient
+    // UUID is the client request identity. Persisted so duplicate
+    // submissions cannot create a second ledger entry.
+    @Column(name = "REQUEST_UUID", unique = true, updatable = false)
     @JsonProperty("uuid")
     private String requestUuid;
 
@@ -98,6 +98,13 @@ public final class Transaction {
             return "";
         } else {
             return requestUuid;
+        }
+    }
+
+    @PrePersist
+    void normalizeRequestUuid() {
+        if (requestUuid != null && requestUuid.isEmpty()) {
+            requestUuid = null;
         }
     }
 

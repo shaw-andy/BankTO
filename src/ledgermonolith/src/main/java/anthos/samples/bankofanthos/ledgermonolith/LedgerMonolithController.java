@@ -32,6 +32,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.CannotCreateTransactionException;
@@ -244,11 +245,7 @@ public final class LedgerMonolithController {
             }
             final DecodedJWT jwt = this.verifier.verify(bearerToken);
 
-            // Check against cache for duplicate transactions
-            if (this.ledgerWriterCache.asMap().containsKey(transaction.getRequestUuid())) {
-                throw new IllegalStateException(
-                        EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
-            }
+            rejectIfDuplicateRequest(transaction.getRequestUuid());
 
             // validate transaction
             transactionValidator.validateTransaction(localRoutingNum,
@@ -264,9 +261,8 @@ public final class LedgerMonolithController {
                 }
             }
             // No exceptions thrown. Add to ledger
-            transactionRepository.save(transaction);
-            this.ledgerWriterCache.put(transaction.getRequestUuid(),
-                    transaction.getTransactionId());
+            appendToLedger(transaction);
+            rememberRequest(transaction);
             LOGGER.info("Submitted transaction successfully");
             return new ResponseEntity<>(READINESS_CODE,
                     HttpStatus.CREATED);
@@ -283,10 +279,54 @@ public final class LedgerMonolithController {
                                               HttpStatus.BAD_REQUEST);
         } catch (ResourceAccessException
                 | CannotCreateTransactionException
-                | HttpServerErrorException e) {
+                | HttpServerErrorException
+                | DataIntegrityViolationException e) {
             LOGGER.error("Failed to retrieve account balance");
             return new ResponseEntity<>(e.getMessage(),
                                               HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Reject a request identity already seen in this process or the ledger.
+     */
+    private void rejectIfDuplicateRequest(String requestUuid) {
+        if (requestUuid.isEmpty()) {
+            return;
+        }
+        if (this.ledgerWriterCache.asMap().containsKey(requestUuid)
+                || transactionRepository.existsByRequestUuid(requestUuid)) {
+            throw new IllegalStateException(
+                    EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
+        }
+    }
+
+    /**
+     * Append the transaction. A unique REQUEST_UUID constraint is the
+     * concurrent safety net across instances.
+     */
+    private void appendToLedger(Transaction transaction) {
+        try {
+            transactionRepository.save(transaction);
+        } catch (DataIntegrityViolationException e) {
+            String requestUuid = transaction.getRequestUuid();
+            if (!requestUuid.isEmpty()
+                    && transactionRepository.existsByRequestUuid(requestUuid)) {
+                throw new IllegalStateException(
+                        EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Remember a submitted request identity in the local process cache.
+     */
+    private void rememberRequest(Transaction transaction) {
+        String requestUuid = transaction.getRequestUuid();
+        if (!requestUuid.isEmpty()) {
+            this.ledgerWriterCache.put(requestUuid,
+                    transaction.getTransactionId());
         }
     }
 

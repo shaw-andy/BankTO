@@ -21,4 +21,5 @@ import org.springframework.stereotype.Repository;
 public interface TransactionRepository
     extends CrudRepository<Transaction, Long> {
 
+    boolean existsByRequestUuid(String requestUuid);
 }
