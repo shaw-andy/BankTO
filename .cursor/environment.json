@@ -1,0 +1,4 @@
+{
+  "name": "BankTO",
+  "install": "bash .cursor/install.sh"
+}
