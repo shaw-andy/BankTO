@@ -32,7 +32,6 @@ jobs:
       - name: Run ledgerwriter baseline tests
         run: ./mvnw -pl src/ledger/ledgerwriter -Dtest=TransactionValidatorTest,LedgerWriterControllerTest test
 
-      # ledgermonolith currently has no behavioral automated tests.
-      # This step validates compilation until future tickets add coverage.
+      # ledgermonolith now includes duplicate-request behavioral tests.
       - name: Run ledgermonolith Maven test lifecycle
         run: ./mvnw -pl src/ledgermonolith test

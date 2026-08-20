@@ -21,9 +21,15 @@ import static anthos.samples.bankofanthos.ledgerwriter.ExceptionMessages.EXCEPTI
 import static anthos.samples.bankofanthos.ledgerwriter.ExceptionMessages.EXCEPTION_MESSAGE_WHEN_AUTHORIZATION_HEADER_NULL;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.MockitoAnnotations.initMocks;
 
@@ -40,11 +46,21 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 import org.mockito.Mock;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 class LedgerWriterControllerTest {
 
@@ -80,7 +96,16 @@ class LedgerWriterControllerTest {
     @BeforeEach
     void setUp() {
         initMocks(this);
-        StackdriverMeterRegistry meterRegistry = new StackdriverMeterRegistry(new StackdriverConfig() {
+        ledgerWriterController = newLedgerWriterController();
+
+        when(verifier.verify(TOKEN)).thenReturn(jwt);
+        when(jwt.getClaim(
+                LedgerWriterController.JWT_ACCOUNT_KEY)).thenReturn(claim);
+    }
+
+    private LedgerWriterController newLedgerWriterController() {
+        StackdriverMeterRegistry meterRegistry = new StackdriverMeterRegistry(
+                new StackdriverConfig() {
               @Override
               public boolean enabled() {
                 return false;
@@ -97,15 +122,36 @@ class LedgerWriterControllerTest {
                 return null;
               }
           }, clock);
-
-        ledgerWriterController = new LedgerWriterController(verifier,
+        return new LedgerWriterController(verifier,
                 meterRegistry,
                 transactionRepository, transactionValidator,
                 LOCAL_ROUTING_NUM, BALANCES_API_ADDR, VERSION);
+    }
 
-        when(verifier.verify(TOKEN)).thenReturn(jwt);
-        when(jwt.getClaim(
-                LedgerWriterController.JWT_ACCOUNT_KEY)).thenReturn(claim);
+    /**
+     * Shared-repository uniqueness, matching a unique REQUEST_UUID index.
+     */
+    private void stubDurableRequestUuidUniqueness() {
+        ConcurrentHashMap<String, Boolean> persisted = new ConcurrentHashMap<>();
+        when(transactionRepository.existsByRequestUuid(anyString()))
+                .thenAnswer(invocation ->
+                        persisted.containsKey(invocation.getArgument(0)));
+        when(transactionRepository.save(any(Transaction.class)))
+                .thenAnswer(invocation -> {
+                    Transaction toSave = invocation.getArgument(0);
+                    String requestUuid = toSave.getRequestUuid();
+                    if (requestUuid != null && !requestUuid.isEmpty()) {
+                        Boolean previous = persisted.putIfAbsent(
+                                requestUuid, Boolean.TRUE);
+                        if (previous != null) {
+                            throw new DataIntegrityViolationException(
+                                    "duplicate key value violates unique "
+                                            + "constraint "
+                                            + "\"transactions_request_uuid_key\"");
+                        }
+                    }
+                    return toSave;
+                });
     }
 
     @Test
@@ -402,5 +448,154 @@ class LedgerWriterControllerTest {
                 EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION,
                 duplicateResult.getBody());
         assertEquals(HttpStatus.BAD_REQUEST, duplicateResult.getStatusCode());
+    }
+
+    /**
+     * BANKTO-2091: the same request identity processed by two ledgerwriter
+     * instances (distinct in-process caches, shared repository) must not
+     * create a second ledger entry. This also covers process restart.
+     */
+    @Test
+    @DisplayName("When the same UUID is submitted to different ledgerwriter "
+            + "instances, the retry is rejected and saved once")
+    void addTransactionRejectsDuplicateUuidAcrossControllerInstances(
+            TestInfo testInfo) {
+        stubDurableRequestUuidUniqueness();
+        when(transaction.getFromRoutingNum()).thenReturn(NON_LOCAL_ROUTING_NUM);
+        when(transaction.getRequestUuid()).thenReturn(testInfo.getDisplayName());
+
+        LedgerWriterController instanceA = newLedgerWriterController();
+        LedgerWriterController instanceB = newLedgerWriterController();
+
+        final ResponseEntity originalResult =
+                instanceA.addTransaction(BEARER_TOKEN, transaction);
+        final ResponseEntity duplicateResult =
+                instanceB.addTransaction(BEARER_TOKEN, transaction);
+
+        assertNotNull(originalResult);
+        assertEquals(HttpStatus.CREATED, originalResult.getStatusCode());
+        assertNotNull(duplicateResult);
+        assertEquals(
+                EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION,
+                duplicateResult.getBody());
+        assertEquals(HttpStatus.BAD_REQUEST, duplicateResult.getStatusCode());
+        verify(transactionRepository, times(1)).save(transaction);
+    }
+
+    @Test
+    @DisplayName("When duplicate UUID requests arrive concurrently, "
+            + "only one ledger entry is created")
+    void addTransactionRejectsConcurrentDuplicateUuid() throws Exception {
+        stubDurableRequestUuidUniqueness();
+        when(transaction.getFromRoutingNum()).thenReturn(NON_LOCAL_ROUTING_NUM);
+        when(transaction.getRequestUuid()).thenReturn("concurrent-request-id");
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(2);
+        List<ResponseEntity> results =
+                Collections.synchronizedList(new ArrayList<>());
+        Runnable submit = () -> {
+            try {
+                start.await();
+                results.add(ledgerWriterController.addTransaction(
+                        BEARER_TOKEN, transaction));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                done.countDown();
+            }
+        };
+        pool.submit(submit);
+        pool.submit(submit);
+        start.countDown();
+        assertTrue(done.await(5, TimeUnit.SECONDS));
+        pool.shutdown();
+
+        long created = results.stream()
+                .filter(response -> response.getStatusCode()
+                        == HttpStatus.CREATED)
+                .count();
+        long rejected = results.stream()
+                .filter(response -> response.getStatusCode()
+                        == HttpStatus.BAD_REQUEST)
+                .count();
+        assertEquals(1, created);
+        assertEquals(1, rejected);
+        assertEquals(
+                EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION,
+                results.stream()
+                        .filter(response -> response.getStatusCode()
+                                == HttpStatus.BAD_REQUEST)
+                        .findFirst()
+                        .orElseThrow()
+                        .getBody());
+    }
+
+    @Test
+    @DisplayName("When unique constraint rejects a racing insert, "
+            + "return HTTP Status 400")
+    void addTransactionWhenRequestUuidUniqueConstraintViolated() {
+        when(transaction.getFromRoutingNum()).thenReturn(NON_LOCAL_ROUTING_NUM);
+        when(transaction.getRequestUuid()).thenReturn("race-request-id");
+        when(transactionRepository.existsByRequestUuid("race-request-id"))
+                .thenReturn(false);
+        when(transactionRepository.save(transaction)).thenThrow(
+                new DataIntegrityViolationException(
+                        "transactions_request_uuid_key"));
+
+        final ResponseEntity actualResult =
+                ledgerWriterController.addTransaction(
+                        BEARER_TOKEN, transaction);
+
+        assertNotNull(actualResult);
+        assertEquals(
+                EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION,
+                actualResult.getBody());
+        assertEquals(HttpStatus.BAD_REQUEST, actualResult.getStatusCode());
+    }
+
+    @Test
+    @DisplayName("Distinct request identities are processed independently "
+            + "across ledgerwriter instances")
+    void addTransactionAllowsDistinctUuidsAcrossControllerInstances() {
+        stubDurableRequestUuidUniqueness();
+        Transaction otherTransaction = mock(Transaction.class);
+        when(transaction.getFromRoutingNum()).thenReturn(NON_LOCAL_ROUTING_NUM);
+        when(transaction.getRequestUuid()).thenReturn("request-id-a");
+        when(otherTransaction.getFromRoutingNum())
+                .thenReturn(NON_LOCAL_ROUTING_NUM);
+        when(otherTransaction.getRequestUuid()).thenReturn("request-id-b");
+
+        LedgerWriterController instanceA = newLedgerWriterController();
+        LedgerWriterController instanceB = newLedgerWriterController();
+
+        final ResponseEntity firstResult =
+                instanceA.addTransaction(BEARER_TOKEN, transaction);
+        final ResponseEntity secondResult =
+                instanceB.addTransaction(BEARER_TOKEN, otherTransaction);
+
+        assertEquals(HttpStatus.CREATED, firstResult.getStatusCode());
+        assertEquals(HttpStatus.CREATED, secondResult.getStatusCode());
+        verify(transactionRepository, times(1)).save(transaction);
+        verify(transactionRepository, times(1)).save(otherTransaction);
+    }
+
+    @Test
+    @DisplayName("Requests without a UUID continue to process independently")
+    void addTransactionAllowsRepeatedBlankRequestUuid() {
+        when(transaction.getFromRoutingNum()).thenReturn(NON_LOCAL_ROUTING_NUM);
+        when(transaction.getRequestUuid()).thenReturn("");
+
+        final ResponseEntity firstResult =
+                ledgerWriterController.addTransaction(
+                        BEARER_TOKEN, transaction);
+        final ResponseEntity secondResult =
+                ledgerWriterController.addTransaction(
+                        BEARER_TOKEN, transaction);
+
+        assertEquals(HttpStatus.CREATED, firstResult.getStatusCode());
+        assertEquals(HttpStatus.CREATED, secondResult.getStatusCode());
+        verify(transactionRepository, times(2)).save(transaction);
     }
 }
