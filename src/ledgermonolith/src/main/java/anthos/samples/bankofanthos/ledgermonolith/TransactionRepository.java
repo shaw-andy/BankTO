@@ -29,6 +29,8 @@ import org.springframework.stereotype.Repository;
 public interface TransactionRepository
         extends CrudRepository<Transaction, Long> {
 
+    boolean existsByRequestUuid(String requestUuid);
+
     @Query(value = "SELECT "
     + "(SELECT SUM(AMOUNT) FROM TRANSACTIONS t "
     + "     WHERE (TO_ACCT = ?1 AND TO_ROUTE = ?2)) - "

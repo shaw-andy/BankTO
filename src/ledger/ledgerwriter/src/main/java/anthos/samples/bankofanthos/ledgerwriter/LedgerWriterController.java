@@ -32,6 +32,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -146,11 +147,7 @@ public final class LedgerWriterController {
             }
             final DecodedJWT jwt = this.verifier.verify(bearerToken);
 
-            // Check against cache for duplicate transactions
-            if (this.cache.asMap().containsKey(transaction.getRequestUuid())) {
-                throw new IllegalStateException(
-                        EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
-            }
+            rejectIfDuplicateRequest(transaction);
 
             // validate transaction
             transactionValidator.validateTransaction(localRoutingNum,
@@ -168,9 +165,7 @@ public final class LedgerWriterController {
             }
 
             // No exceptions thrown. Add to ledger
-            transactionRepository.save(transaction);
-            this.cache.put(transaction.getRequestUuid(),
-                    transaction.getTransactionId());
+            persistNewTransaction(transaction);
             LOGGER.info("Submitted transaction successfully");
             return new ResponseEntity<>(READINESS_CODE,
                     HttpStatus.CREATED);
@@ -191,6 +186,37 @@ public final class LedgerWriterController {
             LOGGER.error("Failed to retrieve account balance");
             return new ResponseEntity<>(e.getMessage(),
                                               HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Reject a retry of the same client request identity.
+     *
+     * The local cache is a same-process fast path. ledger-db uniqueness is
+     * the durable control across instances, restarts, and concurrent writes.
+     */
+    private void rejectIfDuplicateRequest(Transaction transaction) {
+        String requestUuid = transaction.getRequestUuid();
+        if (requestUuid.isEmpty()) {
+            return;
+        }
+        if (this.cache.asMap().containsKey(requestUuid)
+                || transactionRepository.existsByRequestUuid(requestUuid)) {
+            throw new IllegalStateException(
+                    EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
+        }
+    }
+
+    private void persistNewTransaction(Transaction transaction) {
+        try {
+            transactionRepository.save(transaction);
+        } catch (DataIntegrityViolationException e) {
+            throw new IllegalStateException(
+                    EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
+        }
+        String requestUuid = transaction.getRequestUuid();
+        if (!requestUuid.isEmpty()) {
+            this.cache.put(requestUuid, transaction.getTransactionId());
         }
     }
 
