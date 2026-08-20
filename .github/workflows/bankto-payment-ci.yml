@@ -1,0 +1,38 @@
+# BankTO payment verification CI.
+# Runs the verified ledgerwriter unit-test baseline and the ledgermonolith
+# Maven test lifecycle. Does not provision Kubernetes, GKE, PostgreSQL,
+# Google Cloud, or any application secrets.
+
+name: BankTO Payment CI
+
+"on":
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  payment-verification:
+    name: Payment verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: '**/pom.xml'
+
+      - name: Run ledgerwriter baseline tests
+        run: ./mvnw -pl src/ledger/ledgerwriter -Dtest=TransactionValidatorTest,LedgerWriterControllerTest test
+
+      # ledgermonolith currently has no behavioral automated tests.
+      # This step validates compilation until future tickets add coverage.
+      - name: Run ledgermonolith Maven test lifecycle
+        run: ./mvnw -pl src/ledgermonolith test
