@@ -197,7 +197,7 @@ public final class LedgerWriterController {
      */
     private void rejectIfDuplicateRequest(Transaction transaction) {
         String requestUuid = transaction.getRequestUuid();
-        if (requestUuid.isEmpty()) {
+        if (requestUuid == null || requestUuid.isEmpty()) {
             return;
         }
         if (this.cache.asMap().containsKey(requestUuid)
@@ -215,7 +215,7 @@ public final class LedgerWriterController {
                     EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
         }
         String requestUuid = transaction.getRequestUuid();
-        if (!requestUuid.isEmpty()) {
+        if (requestUuid != null && !requestUuid.isEmpty()) {
             this.cache.put(requestUuid, transaction.getTransactionId());
         }
     }

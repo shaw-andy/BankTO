@@ -293,7 +293,7 @@ public final class LedgerMonolithController {
      */
     private void rejectIfDuplicateRequest(Transaction transaction) {
         String requestUuid = transaction.getRequestUuid();
-        if (requestUuid.isEmpty()) {
+        if (requestUuid == null || requestUuid.isEmpty()) {
             return;
         }
         if (this.ledgerWriterCache.asMap().containsKey(requestUuid)
@@ -311,7 +311,7 @@ public final class LedgerMonolithController {
                     EXCEPTION_MESSAGE_DUPLICATE_TRANSACTION);
         }
         String requestUuid = transaction.getRequestUuid();
-        if (!requestUuid.isEmpty()) {
+        if (requestUuid != null && !requestUuid.isEmpty()) {
             this.ledgerWriterCache.put(requestUuid,
                     transaction.getTransactionId());
         }
