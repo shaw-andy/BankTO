@@ -30,6 +30,8 @@ import static anthos.samples.bankofanthos.ledgermonolith.ExceptionMessages.
         EXCEPTION_MESSAGE_SEND_TO_SELF;
 import static anthos.samples.bankofanthos.ledgermonolith.ExceptionMessages.
         EXCEPTION_MESSAGE_INVALID_AMOUNT;
+import static anthos.samples.bankofanthos.ledgermonolith.ExceptionMessages.
+        EXCEPTION_MESSAGE_MANUAL_REVIEW_REQUIRED;
 
 
 /**
@@ -44,6 +46,8 @@ public class TransactionValidator {
     private static final Pattern ACCT_REGEX = Pattern.compile("^[0-9]{10}$");
     // route numbers should be 9 digits between 0 and 9
     private static final Pattern ROUTE_REGEX = Pattern.compile("^[0-9]{9}$");
+    // CAD $10,000.00 in integer minor units (cents)
+    private static final int HIGH_VALUE_THRESHOLD_CENTS = 1_000_000;
 
     private static final Logger LOGGER =
         LogManager.getLogger(TransactionValidator.class);
@@ -53,6 +57,7 @@ public class TransactionValidator {
      *   - Ensure account and routing numbers are in the correct format
      *   - Ensure sender and receiver are different accounts
      *   - Ensure amount is positive
+     *   - Ensure outbound payments of CAD $10,000 or greater are not posted
      *
      * @param authedAccount  the currently authenticated user account
      * @param transaction    the transaction object
@@ -98,6 +103,15 @@ public class TransactionValidator {
             LOGGER.error("Invalid transaction: Transaction amount invalid");
             throw new IllegalArgumentException(
                     EXCEPTION_MESSAGE_INVALID_AMOUNT);
+        }
+        // High-value outbound payments require manual review
+        // and must not be posted automatically.
+        if (fromRoute.equals(localRoutingNum)
+                && amount >= HIGH_VALUE_THRESHOLD_CENTS) {
+            LOGGER.error("Invalid transaction: "
+                    + "High-value payment requires manual review");
+            throw new IllegalArgumentException(
+                    EXCEPTION_MESSAGE_MANUAL_REVIEW_REQUIRED);
         }
     }
 }
