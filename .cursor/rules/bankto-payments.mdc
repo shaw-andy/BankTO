@@ -1,0 +1,47 @@
+---
+description: BankTO non-negotiable payment engineering standards for financial correctness, security, change safety, and verification
+alwaysApply: true
+---
+
+# BankTO Payments Engineering Standards
+
+## Financial correctness
+
+- Preserve the repository's existing exact monetary representation.
+- In the current BankTO payment path, monetary values are represented as integer minor units (cents), including the Java ledger transaction amount.
+- Never introduce floating-point arithmetic for financial calculations.
+- Do not introduce a new monetary abstraction or dependency unless a ticket specifically requires and justifies it.
+- Enforce payment controls in authoritative server-side services, never exclusively in the frontend.
+- Treat transaction-processing changes as dual-path: modern ledger services and the legacy ledger monolith, where both apply.
+
+## Security
+
+- Never log authentication credentials, tokens, secrets, or complete sensitive account credentials.
+- Never introduce secrets into source control.
+- Preserve existing authentication and authorization boundaries unless a requirement explicitly changes them.
+
+## Change safety
+
+- Any behavioral change to payment or ledger logic requires regression tests.
+- Preserve backwards compatibility unless the ticket explicitly authorizes a breaking change.
+- Do not modify unrelated code.
+- Do not add dependencies unless required and justified.
+- Prefer the smallest safe implementation.
+
+## Verification
+
+Before declaring payment-related engineering work complete:
+
+1. Run the narrowest relevant automated tests.
+2. Run broader affected-module tests when practical.
+3. Report the exact tests executed and results.
+4. Document residual risks.
+5. For ledger behavior changes, document rollout and rollback considerations.
+
+## Agent behavior
+
+- Investigate unfamiliar payment architecture before modifying it.
+- Do not assume an implementation is correct merely because it compiles.
+- Ask for clarification when ambiguity materially affects financial behavior.
+- Never weaken, remove, skip, or alter a failing test merely to obtain a passing result.
+- Stop and request human guidance when a decision cannot safely be inferred.
